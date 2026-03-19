@@ -2,6 +2,9 @@
 
 set -e
 
+REQUIRED_PYTHON="3.9"
+VENV_DIR="/opt/django-venv"
+
 # Перевірка, що скрипт запущений від root
 if [[ $EUID -ne 0 ]]; then
     echo "Цей скрипт потрібно запускати з правами root (sudo)."
@@ -32,6 +35,16 @@ else
     echo "[Docker] встановлено: $(docker --version)"
 fi
 
+# Додаємо поточного користувача до групи docker (щоб не потрібен sudo для контейнерів)
+REAL_USER="${SUDO_USER:-$USER}"
+if id -nG "$REAL_USER" | grep -qw docker; then
+    echo "[Docker] користувач '$REAL_USER' вже у групі docker."
+else
+    echo "[Docker] додаємо користувача '$REAL_USER' до групи docker..."
+    usermod -aG docker "$REAL_USER"
+    echo "[Docker] користувач доданий. Зміни набудуть чинності після перелогіну."
+fi
+
 # --- Docker Compose ---
 if command -v docker-compose &>/dev/null || docker compose version &>/dev/null; then
     echo "[Docker Compose] вже встановлений."
@@ -41,42 +54,55 @@ else
     echo "[Docker Compose] встановлено: $(docker compose version)"
 fi
 
+# Порівняння версій через sort -V
+version_gte() {
+    # Повертає 0 (true), якщо $1 >= $2
+    printf '%s\n%s\n' "$2" "$1" | sort -V -C
+}
+
 # --- Python 3.9+ ---
+PYTHON_BIN=""
 if command -v python3 &>/dev/null; then
     PYTHON_VERSION=$(python3 --version | awk '{print $2}')
-    PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
-    PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
-    if [[ "$PYTHON_MAJOR" -ge 3 && "$PYTHON_MINOR" -ge 9 ]]; then
+    if version_gte "$PYTHON_VERSION" "$REQUIRED_PYTHON"; then
         echo "[Python] вже встановлений: Python $PYTHON_VERSION"
+        PYTHON_BIN="python3"
     else
-        echo "[Python] версія $PYTHON_VERSION застаріла, встановлення Python 3.11..."
+        echo "[Python] версія $PYTHON_VERSION застаріла (потрібна >= $REQUIRED_PYTHON), встановлення Python 3.11..."
         apt-get update
         apt-get install -y python3.11 python3.11-venv python3-pip
-        echo "[Python] встановлено: $(python3.11 --version)"
+        PYTHON_BIN="python3.11"
+        echo "[Python] встановлено: $($PYTHON_BIN --version)"
     fi
 else
     echo "[Python] встановлення Python 3.11..."
     apt-get update
     apt-get install -y python3.11 python3.11-venv python3-pip
-    echo "[Python] встановлено: $(python3.11 --version)"
+    PYTHON_BIN="python3.11"
+    echo "[Python] встановлено: $($PYTHON_BIN --version)"
 fi
 
-# --- pip ---
-if ! command -v pip3 &>/dev/null; then
-    echo "[pip] встановлення..."
+# Перевіряємо, що pip прив'язаний до правильної версії Python
+if ! "$PYTHON_BIN" -m pip --version &>/dev/null; then
+    echo "[pip] встановлення для $PYTHON_BIN..."
     apt-get install -y python3-pip
 fi
+echo "[pip] використовується: $($PYTHON_BIN -m pip --version)"
 
-# --- Django ---
-if pip3 show django &>/dev/null; then
-    DJANGO_VERSION=$(pip3 show django | grep "^Version:" | awk '{print $2}')
-    echo "[Django] вже встановлений: версія $DJANGO_VERSION"
+# --- Django (у віртуальному середовищі) ---
+if [[ -d "$VENV_DIR" ]] && "$VENV_DIR/bin/python" -m pip show django &>/dev/null; then
+    DJANGO_VERSION=$("$VENV_DIR/bin/python" -m pip show django | grep "^Version:" | awk '{print $2}')
+    echo "[Django] вже встановлений у $VENV_DIR: версія $DJANGO_VERSION"
 else
+    echo "[Django] створення віртуального середовища у $VENV_DIR..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
     echo "[Django] встановлення..."
-    pip3 install django --break-system-packages
-    echo "[Django] встановлено: $(pip3 show django | grep '^Version:' | awk '{print $2}')"
+    "$VENV_DIR/bin/pip" install django
+    DJANGO_VERSION=$("$VENV_DIR/bin/pip" show django | grep "^Version:" | awk '{print $2}')
+    echo "[Django] встановлено у $VENV_DIR: версія $DJANGO_VERSION"
 fi
 
 echo ""
 echo "=== Всі інструменти встановлені ==="
+echo "Django доступний через: source $VENV_DIR/bin/activate"
